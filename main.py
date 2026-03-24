@@ -1,91 +1,96 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 import numpy as np
 import pickle
 
-# -------------------------
-# Load production artifacts
-# -------------------------
-with open("disease_probability_ann.pkl", "rb") as f:
+# =========================
+# Load Saved Objects
+# =========================
+with open("cotton_ann_model.pkl", "rb") as f:
     model = pickle.load(f)
 
-with open("stress_scaler.pkl", "rb") as f:
+with open("scaler.pkl", "rb") as f:
     scaler = pickle.load(f)
-
-with open("crop_encoder.pkl", "rb") as f:
-    crop_encoder = pickle.load(f)
 
 with open("stage_encoder.pkl", "rb") as f:
     stage_encoder = pickle.load(f)
 
-# -------------------------
-# FastAPI app
-# -------------------------
-app = FastAPI(
-    title="Crop Disease Probability API",
-    description="Stress → Disease Probability ANN (Production)",
-    version="1.0.0"
-)
+# =========================
+# FastAPI App
+# =========================
+app = FastAPI(title="Cotton Disease Prediction API")
 
-# -------------------------
-# Input schema (API OUTPUTS ONLY)
-# -------------------------
-class DiseaseInput(BaseModel):
-    crop: str
+# =========================
+# Input Schema
+# =========================
+class InputData(BaseModel):
     growth_stage: str
-
     vegetation_stress_score: float
     water_stress_score: float
     soil_stress_score: float
     final_stress_percent: float
-
     gdd_min: float
     gdd_max: float
 
+# =========================
+# Disease Labels
+# =========================
+disease_labels = [
+    "damping_off",
+    "root_rot",
+    "bacterial_blight",
+    "alternaria_leaf_spot",
+    "fusarium_wilt",
+    "verticillium_wilt",
+    "boll_rot"
+]
 
-# -------------------------
-# Prediction endpoint
-# -------------------------
-@app.post("/predict-disease")
-def predict_disease(data: DiseaseInput):
+# =========================
+# Health Check
+# =========================
+@app.get("/")
+def home():
+    return {"message": "Cotton Disease ANN API is running"}
 
+# =========================
+# Prediction Endpoint
+# =========================
+@app.post("/predict")
+def predict(data: InputData):
     try:
-        # Encode categorical metadata
-        crop_enc = crop_encoder.transform([data.crop])[0]
-        stage_enc = stage_encoder.transform([data.growth_stage])[0]
+        # Encode stage
+        stage_encoded = stage_encoder.transform([data.growth_stage])[0]
 
-    except ValueError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Encoding error: {str(e)}"
-        )
+        # Prepare input array
+        input_features = np.array([[
+            data.vegetation_stress_score,
+            data.water_stress_score,
+            data.soil_stress_score,
+            data.final_stress_percent,
+            data.gdd_min,
+            data.gdd_max,
+            stage_encoded
+        ]])
 
-    # ANN input vector (STRICT CONTRACT)
-    X = np.array([[
-        data.vegetation_stress_score,
-        data.water_stress_score,
-        data.soil_stress_score,
-        data.final_stress_percent,
-        data.gdd_min,
-        data.gdd_max,
-        crop_enc,
-        stage_enc
-    ]])
+        # Scale
+        input_scaled = scaler.transform(input_features)
 
-    # Scale
-    X_scaled = scaler.transform(X)
+        # Predict
+        predictions = model.predict(input_scaled)[0]
 
-    # Predict
-    preds = model.predict(X_scaled)[0]
-
-    # Response
-    return {
-        "crop": data.crop,
-        "growth_stage": data.growth_stage,
-        "disease_probabilities": {
-            "rust": round(float(preds[0]), 4),
-            "blight": round(float(preds[1]), 4),
-            "root_rot": round(float(preds[2]), 4),
-            "healthy": round(float(preds[3]), 4)
+        # Map output
+        result = {
+            disease_labels[i]: float(round(predictions[i], 4))
+            for i in range(len(disease_labels))
         }
-    }
+
+        return {
+            "status": "success",
+            "predictions": result
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
